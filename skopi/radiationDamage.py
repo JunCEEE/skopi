@@ -5,6 +5,9 @@ from skopi.detector import *
 from skopi.beam import *
 import skopi.util as su
 from skopi.diffraction import calculate_compton
+from skopi.agipd_to_skopi import get_skopi_sensor
+from extra_geom import AGIPD_1MGeometry
+
 
 
 def generate_rotations(uniform_rotation, rotation_axis, num_quaternions):
@@ -196,14 +199,22 @@ def make_one_diffr(myquaternions, counter, parameters, output_name):
         given_fluence = False
 
     # Detector geometry
-    det = PlainDetector(geom=geomfile, beam=beam)
+    # det = PlainDetector(geom=geomfile, beam=beam)
+    crystfel_geom = AGIPD_1MGeometry.from_crystfel_geom(geomfile)
+    det = get_skopi_sensor(input_detector=crystfel_geom,
+                 single_pixel_width=0.0002,
+                 single_pixel_height=0.0002,
+                 beam=beam)
+
+
     px = det.detector_pixel_num_x
-    py = det.detector_pixel_num_x
+    py = det.detector_pixel_num_y
 
     done = False
     time_slice = 0
     total_phot = 0
-    detector_intensity = np.zeros((1, py, px))
+    # detector_intensity = np.zeros((1, py, px))
+    detector_intensity = np.zeros(det.pixel_position_reciprocal.shape[:-1])
     while not done:
         # set time slice to calculate diffraction pattern
         if time_slice + slice_interval >= num_slices:
