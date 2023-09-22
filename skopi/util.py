@@ -2,6 +2,7 @@ import h5py
 import numpy as np
 import os
 from skopi.ff_waaskirf_database import load_waaskirf_database, load_cromermann_database
+pdb_file = "./2nip.pdb"
 
 xp = np
 if os.environ.get('USE_CUPY') == '1':
@@ -149,7 +150,7 @@ def symmpdb(fname, ff='WK', filter_occupancy=False):
     :return: Numpy array containing the type and position of each atom in the pdb file.
     """
 
-    atom_types = {'H': 1, 'HE': 2, 'C': 6, 'N1+': 6, 'N': 7, 'O': 8, 'O1-': 9, 'P': 15, 'S': 16, 'CL': 18, 'FE': 26}
+    atom_types = {'H': 1, 'HE': 2, 'C': 6, 'N1+': 6, 'N': 7, 'O': 8, 'O1-': 9, 'P': 15, 'S': 16, 'CL': 18, 'FE': 26, 'CU': 29}
 
     fin = open(fname, 'r')
 

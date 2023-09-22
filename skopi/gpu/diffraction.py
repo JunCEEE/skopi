@@ -2,8 +2,12 @@ from numba import cuda, float64, int64, int32, complex128
 import skopi.diffraction as pd
 import math
 import numpy as np
+from tqdm.autonotebook import tqdm
 
-from skopi.util import xp
+from skopi.util import xp, asnumpy
+from scipy.interpolate import CubicSpline
+
+
 
 
 @cuda.jit('void(float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:], int64, int64[:], int64)')
@@ -77,10 +81,14 @@ def calculate_diffraction_pattern_gpu(reciprocal_space, particle, return_type='i
     reciprocal_norm_1d = xp.sqrt(xp.sum(xp.square(reciprocal_space_1d), axis=-1))
     qvectors_1d = 2*np.pi*reciprocal_space_1d
 
-    # Calculate atom form factor for the reciprocal space, passing in sin(theta)/lambda in per Angstrom
-    form_factor = pd.calculate_atomic_factor(particle=particle,
-                                             q_space=reciprocal_norm_1d * (1e-10 / 2.),  # For unit compatibility
-                                             pixel_num=pixel_number)
+    # if form_factor is None:
+    #     # Calculate atom form factor for the reciprocal space, passing in sin(theta)/lambda in per Angstrom
+    #     form_factor = pd.calculate_atomic_factor(particle=particle,
+    #                                             q_space=reciprocal_norm_1d * (1e-10 / 2.),  # For unit compatibility
+    #                                             pixel_num=pixel_number)
+    # else:
+    #     pass
+
 
     # Get atom position
     atom_position = np.ascontiguousarray(particle.atom_pos[:])
@@ -93,16 +101,72 @@ def calculate_diffraction_pattern_gpu(reciprocal_space, particle, return_type='i
     # atom_number = atom_position.shape[0]
     split_index = xp.array(particle.split_idx)
 
-    cuda_split_index = cuda.to_device(split_index)
     cuda_atom_position = cuda.to_device(atom_position)
     cuda_reciprocal_position = cuda.to_device(qvectors_1d)
-    cuda_form_factor = cuda.to_device(form_factor)
 
-    # Calculate the pattern
-    calculate_pattern_gpu_back_engine[(pixel_number + 511) // 512, 512](
-        cuda_form_factor, cuda_reciprocal_position, cuda_atom_position,
-        pattern_cos, pattern_sin, atom_type_num, cuda_split_index,
-        pixel_number)
+    q_space = asnumpy(reciprocal_norm_1d * (1e-10 / 2.))  # CubicSpline is not compatible with Cupy
+    q_space_1d = np.reshape(q_space, [pixel_number, ])
+
+
+    if particle.num_atom_types == 1:
+        f_hkl = np.zeros(1, pixel_number)
+        cs = CubicSpline(particle.q_sample, particle.ff_table[:])  # Use cubic spline
+        f_hkl[0, :] = cs(q_space_1d)  # interpolate
+        cuda_split_index = cuda.to_device(split_index)
+        cuda_form_factor = cuda.to_device(form_factor)
+        calculate_pattern_gpu_back_engine[(pixel_number + 511) // 512, 512](
+            cuda_form_factor, cuda_reciprocal_position, cuda_atom_position,
+            pattern_cos, pattern_sin, atom_type_num, cuda_split_index,
+            pixel_number)
+    else:
+        ctx = cuda.current_context()
+        free_bytes, total_bytes = ctx.get_memory_info()
+        form_factor_chunk_size = np.max([int((free_bytes-2e9)//(8*pixel_number)),1])
+        print("chunk_size =",form_factor_chunk_size, flush=True)
+        atom_type_indices = range(particle.num_atom_types)
+        form_factor_chunk_ranges = [atom_type_indices[i:i + form_factor_chunk_size] for i in range(0, particle.num_atom_types, form_factor_chunk_size)]
+        for atom_type_chunk in tqdm(form_factor_chunk_ranges):
+            f_hkl = np.zeros((len(atom_type_chunk), pixel_number))
+            for i, atm in enumerate(atom_type_chunk):
+                cs = CubicSpline(particle.q_sample, particle.ff_table[atm, :])  # Use cubic spline
+                f_hkl[i, :] = cs(q_space_1d)  # interpolate
+            f_hkl = np.reshape(f_hkl, (len(atom_type_chunk),) + q_space.shape)
+            cuda_form_factor = cuda.to_device(f_hkl)
+            atom_type_num_local = len(atom_type_chunk)
+            split_index_local = split_index[list(atom_type_chunk)+[atom_type_chunk[-1]+1,]]
+            cuda_split_index = cuda.to_device(split_index_local)
+
+            # Calculate the pattern
+            calculate_pattern_gpu_back_engine[(pixel_number + 511) // 512, 512](
+                cuda_form_factor, cuda_reciprocal_position, cuda_atom_position,
+                pattern_cos, pattern_sin, atom_type_num_local, cuda_split_index,
+                pixel_number)
+
+            # cuda.device_array_like(cuda_form_factor, 0)
+            # cuda.device_array_like(cuda_split_index, 0)
+            del cuda_form_factor
+            del cuda_split_index
+
+            
+
+    # ctx = cuda.current_context()
+    # free_bytes, total_bytes = ctx.get_memory_info()
+    # form_factor_chunk_size = np.max([int((free_bytes-100e6)//(form_factor.itemsize*np.prod(form_factor.shape[1:]))),1])
+    # print("chunk_size =",form_factor_chunk_size, flush=True)
+    # # form_factor_chunk_size = 200
+    # ff_indices = range(form_factor.shape[0])
+    # form_factor_chunk_ranges = [ff_indices[i:i + form_factor_chunk_size] for i in range(0, form_factor.shape[0], form_factor_chunk_size)]
+    # for form_factor_chunk_range in form_factor_chunk_ranges:
+    #     cuda_form_factor = cuda.to_device(form_factor[form_factor_chunk_range])
+    #     atom_type_num_local = len(form_factor_chunk_range)
+    #     split_index_local = split_index[list(form_factor_chunk_range)+[form_factor_chunk_range[-1]+1,]]
+    #     cuda_split_index = cuda.to_device(split_index_local)
+
+    #     # Calculate the pattern
+    #     calculate_pattern_gpu_back_engine[(pixel_number + 511) // 512, 512](
+    #         cuda_form_factor, cuda_reciprocal_position, cuda_atom_position,
+    #         pattern_cos, pattern_sin, atom_type_num_local, cuda_split_index,
+    #         pixel_number)
 
     # Add the hydration layer
     if particle.mesh is not None:
